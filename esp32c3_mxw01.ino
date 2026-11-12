@@ -664,6 +664,12 @@ static void handleLine(char* cmd) {
     }
     case 's': reportStatus(); break;
     case 'd': scanDump(12000); break;
+    case 'q':
+      printWifiQr(WIFI_SSID, WIFI_PASS, "WPA");
+      break;
+    case 'Q':
+      qrDump(WIFI_SSID, WIFI_PASS, "WPA");
+      break;
     case 'c':
       wifiOffDuringPrint = !wifiOffDuringPrint;
       Serial.printf("[+] wifi off during print: %s\n", wifiOffDuringPrint ? "on" : "off");
@@ -688,6 +694,105 @@ static void handleLine(char* cmd) {
   }
 }
 
+
+
+// ---------------------------------------------------------------------- qr ---
+
+// Arduino defines LOW/HIGH as pin levels and qrcodegen has Ecc::LOW / Ecc::HIGH,
+// so both macros have to go before the include.
+#undef LOW
+#undef HIGH
+#include "src/qrcodegen.hpp"
+
+// "WIFI:T:WPA;S:<ssid>;P:<pass>;;" — the characters below have to be escaped.
+static void qrEscape(const char* in, char* out, size_t cap) {
+  size_t o = 0;
+  for (const char* p = in; *p && o + 2 < cap; p++) {
+    char ch = *p;
+    if (ch == '\\' || ch == ';' || ch == ',' || ch == ':' || ch == '"')
+      out[o++] = '\\';
+    out[o++] = ch;
+  }
+  out[o] = 0;
+}
+
+static void wifiPayload(const char* ssid, const char* pass, const char* auth,
+                        char* out, size_t cap) {
+  char es[96], ep[96];
+  qrEscape(ssid, es, sizeof es);
+  qrEscape(pass, ep, sizeof ep);
+  snprintf(out, cap, "WIFI:T:%s;S:%s;P:%s;;", auth, es, ep);
+}
+
+// Renders the QR sheet; returns a heap buffer of `rowsOut` 48-byte rows.
+static uint8_t* buildWifiQrPage(const char* ssid, const char* pass, const char* auth,
+                                uint16_t* rowsOut) {
+  char payload[256];
+  wifiPayload(ssid, pass, auth, payload, sizeof payload);
+
+  qrcodegen::QrCode qr =
+      qrcodegen::QrCode::encodeText(payload, qrcodegen::QrCode::Ecc::MEDIUM);
+  const int n = qr.getSize();
+
+  const int margin = 4;                                  // px around the symbol
+  const int mod = (PRINT_W - 2 * margin) / (n + 8);      // 4-module quiet zone
+  if (mod < 2) return nullptr;                           // payload too long
+
+  const int symPx = mod * n;
+  const int boxPx = mod * (n + 8);
+  const uint16_t MAXR = 520;
+
+  uint8_t* buf = allocCanvas(MAXR);
+  if (!buf) return nullptr;
+  Canvas c{buf, MAXR};
+  c.clear();
+
+  c.textCentered(8, "WIFI", 3);
+
+  const int x0 = (PRINT_W - boxPx) / 2 + 4 * mod;
+  const int y0 = 34;
+  for (int y = 0; y < n; y++)
+    for (int x = 0; x < n; x++)
+      if (qr.getModule(x, y)) c.fill(x0 + x * mod, y0 + y * mod, mod, mod);
+
+  int ty = y0 + symPx + 10;
+  char line[64];
+  snprintf(line, sizeof line, "SSID %s", ssid);
+  c.text(8, ty, line, 2);
+  ty += 20;
+  snprintf(line, sizeof line, "PASS %s", pass);
+  c.text(8, ty, line, 2);
+  ty += 24;
+  c.textCentered(ty, "SCAN TO JOIN", 1);
+
+  *rowsOut = trimHeight(buf, MAXR);
+  if (!*rowsOut) { free(buf); return nullptr; }
+  return buf;
+}
+
+static void printWifiQr(const char* ssid, const char* pass, const char* auth) {
+  uint16_t rows = 0;
+  uint8_t* buf = buildWifiQrPage(ssid, pass, auth, &rows);
+  if (!buf) { Serial.println("[x] qr build failed (payload too long?)"); return; }
+  Serial.printf("[*] qr page %u rows\n", rows);
+  printRows(buf, rows, intensity);
+  free(buf);
+}
+
+// Prints the raw module matrix so a host can verify the symbol end to end.
+static void qrDump(const char* ssid, const char* pass, const char* auth) {
+  char payload[256];
+  wifiPayload(ssid, pass, auth, payload, sizeof payload);
+  qrcodegen::QrCode qr =
+      qrcodegen::QrCode::encodeText(payload, qrcodegen::QrCode::Ecc::MEDIUM);
+  const int n = qr.getSize();
+  Serial.printf("QRPAYLOAD %s\n", payload);
+  Serial.printf("QRSIZE %d\n", n);
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) Serial.print(qr.getModule(x, y) ? '1' : '0');
+    Serial.println();
+  }
+}
 
 // ------------------------------------------------------------------- wifi ---
 
@@ -718,6 +823,8 @@ hr{border:0;border-top:1px solid #ddd;margin:18px 0}
 <select id=i><option value=100>100%</option><option value=90>90%</option><option value=80>80%</option><option value=70>70%</option></select>
 <button onclick="pt()">Metin yazdır</button>
 <hr>
+<button onclick="pq()">WiFi QR yazdır</button>
+<hr>
 <input type=file id=f accept=".pbm,image/x-portable-bitmap">
 <button onclick="pp()">PBM yazdır</button>
 <hr>
@@ -730,6 +837,7 @@ async function pt(){const t=$('t').value.trim();if(!t)return;
 function b64(buf){const b=new Uint8Array(buf);let s='';const CH=0x8000;
  for(let i=0;i<b.length;i+=CH)s+=String.fromCharCode.apply(null,b.subarray(i,i+CH));
  return btoa(s)}
+async function pq(){const r=await fetch('/wifi?i='+$('i').value);alert(await r.text())}
 async function pp(){const f=$('f').files[0];if(!f)return;
  const r=await fetch('/pbm?i='+$('i').value,{method:'POST',body:b64(await f.arrayBuffer())});alert(await r.text())}
 st();setInterval(st,4000);
@@ -971,6 +1079,23 @@ static void handlePbm() {
   server.send(200, "text/plain", msg);
 }
 
+static void handleWifiQr() {
+  const String ssid = server.hasArg("s") ? server.arg("s") : String(WIFI_SSID);
+  const String pass = server.hasArg("p") ? server.arg("p") : String(WIFI_PASS);
+  const String auth = server.hasArg("t") ? server.arg("t") : String("WPA");
+
+  uint16_t rows = 0;
+  uint8_t* buf = buildWifiQrPage(ssid.c_str(), pass.c_str(), auth.c_str(), &rows);
+  if (!buf) { server.send(400, "text/plain", "qr build failed for that payload"); return; }
+
+  const uint8_t inten = argIntensity();
+  queueJob(buf, rows, inten);
+
+  char msg[72];
+  snprintf(msg, sizeof msg, "queued wifi qr %u rows @ %u%%", rows, inten);
+  server.send(200, "text/plain", msg);
+}
+
 static void startWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -1001,6 +1126,7 @@ static void startHttp() {
   server.on("/text", HTTP_GET, handleText);
   server.on("/print", HTTP_POST, handleRaw);
   server.on("/pbm", HTTP_POST, handlePbm);
+  server.on("/wifi", HTTP_GET, handleWifiQr);
   server.onNotFound([]() { server.send(404, "text/plain", "not found"); });
   server.begin();
   Serial.println("[*] http server on port 80");
@@ -1024,7 +1150,7 @@ void setup() {
     reportVersion();
   }
 
-  Serial.println("[?] p=selftest t <text> s=status d=scan-dump w=wifi c=coex b=battery v=version i <0-100>");
+  Serial.println("[?] p=selftest t <text> s=status d=scan-dump w=wifi c=coex q=wifi-qr Q=qr-dump b=battery v=version i <0-100>");
 }
 
 void loop() {

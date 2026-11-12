@@ -61,6 +61,7 @@ a PBM upload and a live status panel.
 | `/text?t=...&i=100` | GET | prints text (wrapped, 3x 5x7 font) |
 | `/print?i=100` | POST | **base64** of raw 1 bpp rows, 48 B/row, LSB-first |
 | `/pbm?i=100` | POST | **base64** of a binary PBM (P4), width ≤ 384 |
+| `/wifi?s=&p=&t=WPA` | GET | prints a WiFi join QR (defaults to the stored credentials) |
 
 Bodies must be base64: the ESP32 `WebServer` swallows any non-form POST body into
 a `String`, which truncates at the first `0x00`. It also means the `Content-Type`
@@ -78,6 +79,22 @@ The job is queued and the HTTP request returns immediately; the print itself run
 in `loop()`, then WiFi carries on as before. While a page is printing (≈9 s for
 300 rows) the web server is blocked, since everything is single-threaded.
 
+## WiFi QR sheet
+
+`q` on the serial console, the button in the web UI, or `GET /wifi` prints a sheet
+with a QR code for `WIFI:T:WPA;S:<ssid>;P:<pass>;;`, the SSID/password in text
+underneath, and a "scan to join" line. SSID, password and auth type can be
+overridden per request: `/wifi?s=Guest&p=misafir&t=WPA`.
+
+The symbol is rendered at 29×29 modules (version 3, ECC MEDIUM), ~10 px per module
+on the 384 px head, with a 4-module quiet zone — big enough for a phone camera at
+arm's length.
+
+`Q` prints the raw module matrix as `0`/`1` lines preceded by `QRSIZE`, which is
+how the encoder is checked end to end: rebuild the matrix on the host, decode it
+with OpenCV, compare against the payload. That is how this feature was verified
+rather than by eyeballing paper.
+
 ## Serial commands
 
 | command | action |
@@ -90,6 +107,8 @@ in `loop()`, then WiFi carries on as before. While a page is printing (≈9 s fo
 | `c` | toggle "WiFi off during print" (default off) |
 | `b` | battery percentage |
 | `v` | firmware version |
+| `q` | print the WiFi join QR sheet |
+| `Q` | dump the QR module matrix to serial (for host-side verification) |
 | `i <0-100>` | print intensity (default 100) |
 
 ## Protocol notes
@@ -114,6 +133,12 @@ in `loop()`, then WiFi carries on as before. While a page is printing (≈9 s fo
 - WiFi and BLE share the C3's single 2.4 GHz radio. At interval-paced writes they
   coexist fine; the serial command `c` can still hand the radio over to BLE for the
   duration of a job if you ever see dropped rows.
+
+## Third-party code
+
+`src/qrcodegen.{hpp,cpp}` (in the sketch, because Arduino only compiles `src/`
+recursively) is Project Nayuki's QR generator, MIT licensed — see
+`third_party/README.md`. Everything else here is original.
 
 ## Known limits
 
